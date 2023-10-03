@@ -15,31 +15,81 @@ export interface ServerInfo {
 
 export class TopperClient {
 	PING_TIMEOUT = 1000 * 60
+	LATENCY_SEARCH_INTERVAL = 1000 * 60
 
 	#params: TopperClientParams
 	#serverInfo = new Map<string, ServerInfo>()
 	#serverConnections = new Map<string, Deno.TcpConn>()
 	#ongoingPings = new Map<string, VoidFunction>()
 	#connectedServer: string | null = null
+	#interval: unknown = null
 
 	constructor(params: TopperClientParams) {
 		this.#params = params
 	}
 
-	addServer(address: string): Promise<void> {
+	addServer(address: string): void {
+		this.#serverInfo.set(address, { connectedSince: null, lastPingAt: null, pingMs: null })
 	}
 
-	removeServer(address: string): void {}
+	removeServer(address: string): void {
+		if (this.#serverConnections.has(address)) this.#closeConnection(address)
 
-	connect(): Promise<void> {}
+		this.#serverInfo.delete(address)
+	}
+
+	async connect(): Promise<void> {
+		await this.pingAllServers()
+
+		this.#interval = setInterval(() => {
+			this.pingAllServers()
+		}, this.LATENCY_SEARCH_INTERVAL)
+
+		// TODO: find server with lowest latency, set it as primary connection
+	}
+
+	// TODO: findServerWithLowestLatency, primaryConnectToServer, sendMessage
+
+	async pingAllServers(): Promise<void> {
+		const pingedServers = new Set<string>()
+
+		const getServerToBePinged = () => {
+			for (const server of this.getServers()) {
+				if (!pingedServers.has(server)) return server
+			}
+
+			return null
+		}
+
+		while (true) {
+			const server = getServerToBePinged()
+			if (!server) break
+
+			await this.#ping(server)
+		}
+	}
 
 	disconnect(): void {}
 
-	getConnectedServer(): string | null {}
+	getConnectedServer(): string | null {
+		return this.#connectedServer
+	}
 
-	getServerInfo(): ServerInfo {}
+	getServers(): string[] {
+		return [...this.#serverInfo.keys()]
+	}
+
+	getServerInfo(address: string): ServerInfo {
+		const info = this.#serverInfo.get(address)
+		if (!info) throw new Error(`No server exists for address "${address}"`)
+
+		return info
+	}
 
 	async #createConnection(address: string) {
+		// Don't create a new connection if the connection already exists
+		if (this.#serverConnections.has(address)) return
+
 		const [hostname, portRaw] = address.split(':')
 
 		const port = portRaw ? parseInt(portRaw) : 7459
@@ -65,6 +115,9 @@ export class TopperClient {
 	}
 
 	#closeConnection(address: string) {
+		// Don't close the connection if it already exists
+		if (!this.#serverConnections.has(address)) return
+
 		const conn = this.#serverConnections.get(address)
 		if (!conn) throw new Error('Logical error: cannot close because no connection exists')
 
@@ -84,9 +137,16 @@ export class TopperClient {
 	}
 
 	async #ping(address: string) {
+		await this.#createConnection(address)
+		await this.#pingConnection(address)
+
+		if (this.#connectedServer !== address) this.#closeConnection(address)
+	}
+
+	async #pingConnection(address: string) {
 		const startTime = Date.now()
 
-		await new Promise<boolean>((resolve) => {
+		const success = await new Promise<boolean>((resolve) => {
 			const finish = (success: boolean) => {
 				this.#ongoingPings.delete(address)
 				resolve(success)
@@ -98,7 +158,14 @@ export class TopperClient {
 			this.#sendBytes(address, buildMessage(new Uint8Array()))
 		})
 
-		return Date.now() - startTime
+		if (!success) return
+
+		const existingServerInfo = this.#serverInfo.get(address)
+		const lastPingAt = Date.now()
+		const pingMs = lastPingAt - startTime
+		const connectedSince = existingServerInfo?.connectedSince ?? null
+
+		this.#serverInfo.set(address, { lastPingAt, pingMs, connectedSince })
 	}
 
 	#handleIncomingMessage(address: string, bytes: Uint8Array) {
