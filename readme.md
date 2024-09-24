@@ -1,6 +1,6 @@
 # Topper
 
-An alternative to Apache Kafka.
+An incomplete research project for an alternative to Apache Kafka.
 
 A library for sending TCP messages between a client and multiple servers, here called the network. The network attains consensus on the
 order of the messages, is fault proof, denial-of-service attack resistant, and capable of scaling infinitely.
